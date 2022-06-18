@@ -17,7 +17,7 @@ pub async fn handle(mut request:Req) -> Result<Res,Error> {
       let is_ws = hyper_tungstenite::is_upgrade_request(&request);
 
       if !proxy {
-        if !is_ws { return Ok(Response::new(Body::from("not allowed update to websocket"))); }
+        if is_ws { return Ok(Response::new(Body::from("not allowed update to websocket"))); }
 
         return Ok(http::static_server(request,domain).await);
       }
