@@ -1,153 +1,78 @@
-use serde::{Deserialize,Serialize};
-use std::{path::Path, collections::BTreeMap, sync::Arc, process::exit};
-use warp::{Filter, host::Authority, reject};
-use tokio::fs;
+use hyper::{server::conn::Http, service::service_fn, Body, Request, Response};
+use tokio::{net::TcpListener, spawn};
+use tokio_rustls::{TlsAcceptor, rustls::{PrivateKey, Certificate}};
+use rustls_pemfile;
 
+use std::{net::SocketAddr, sync::Arc};
 
+use crate::{config::Config, router::handle};
+
+#[macro_use]
+extern crate lazy_static;
+
+pub mod config;
 pub mod http;
+pub mod router;
 pub mod ws;
 
+pub type Req = Request<Body>;
+pub type Res = Response<Body>;
 
-static CONFIG: &str = "config.json";
-static CERT: &str = "cert.pem";
+lazy_static! {
+  static ref CONFIG: Config = config::get_config();
+}
+
 static KEY: &str = "key.pem";
-
-
+static CERT: &str = "cert.pem";
 
 #[tokio::main]
 async fn main() {
-  println!("read config");
-  let targets= get_config().await;
-  let target_http = Arc::new(targets.0);
-  let target_ws = Arc::new(targets.1);
+  let port = CONFIG.port;
+  println!("Port {}", port);
 
-  println!("setting filter");
-  let filter = warp::ws()
-    .and(warp::host::optional())
-    .and(warp::path::full())
-    .and_then(move|ws,host,path|{
-      let targets = Arc::clone(&target_ws);
-      async move{
+  println!("Creating Server");
+  let acceptor = tls().await;
+  let listener = TcpListener::bind(SocketAddr::from(([0,0,0,0], port))).await.unwrap();
 
-        let target = choose(targets.to_vec(),host);
-        match target {
-          Some(target) => Ok(ws::ws(target,ws,path).await),
-          None => Err(reject::not_found()),
-        }
-  
-      }
-    })
-    .or(
-      warp::host::optional()
-      .and(warp::header::headers_cloned())
-      .and(warp::path::full())
-      .and(warp::method())
-      .and(warp::body::bytes())
-      .and_then(move|host,headers,path,method,body|{
-        let targets = Arc::clone(&target_http);
-        async move {
-        
-          let target = choose(Arc::clone(&targets).to_vec(),host);
-          match target {
-            Some(target) => Ok(http::http(target,headers,path,method,body).await),
-            None => Err(reject::not_found()),
-          }
+  println!("#= Runing ================================================");
+  loop {
+    let (tcp_stream, _) = listener.accept().await.unwrap();
+    let acceptor = acceptor.clone();
 
-        }
-      }
-      ));
-
-  println!("create server");
-  let server = warp::serve(filter).tls().cert_path(CERT).key_path(KEY);
-
-  println!("running");
-  println!("binding port 8000");
-  server.run(([127, 0, 0, 1], 8000)).await;
-
-  println!("stopped");
-}
-
-#[derive(Clone)]
-pub enum Target {
-  Proxy(String,Port),
-  Static(String,String)
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum TargetValue {
-  Port(Port),
-  Path(String),
-}
-
-type Port = u16;
-
-fn choose(targets: Vec<Target> ,host: Option<Authority>)-> Option<TargetValue> {
-  let host = host.unwrap().host().to_string();
-  for target in targets.into_iter() {
-    match target {
-      Target::Proxy(name,val) => {
-        if host == name { return Some(TargetValue::Port(val)); }
-      },
-      Target::Static(name,val) => {
-        if host == name { return Some(TargetValue::Path(val)); }
-      }
-    }
+    spawn(async move {
+      let tls_stream = acceptor.accept(tcp_stream).await.unwrap();
+      let server = Http::new()
+        .http1_title_case_headers(true)
+        .http1_preserve_header_case(true)
+        .http2_enable_connect_protocol()
+        .serve_connection(tls_stream, service_fn(handle));
+      if let Err(e) = server.await {
+        eprintln!("server error: {}", e);
+      };
+    });
   }
-
-  None
 }
 
-async fn get_config()->(Vec<Target>,Vec<Target>) {
+async fn tls() -> TlsAcceptor {
 
-  if !Path::new(CONFIG).is_file() {
-    
-    
-    println!(r#"
-Need config.json.
-Create config and restart.
-Example.
-{{
-  "proxy.domain.com": 8080,
-  "static.domain.com": "C:/"
-}}
-"#);
-  exit(0)
-  }
+  let mut key: Vec<PrivateKey> = {
+    let file = std::fs::File::open(KEY).unwrap();
+    let mut buf = std::io::BufReader::new(file);
+    rustls_pemfile::pkcs8_private_keys(&mut buf).map(|mut keys| keys.drain(..).map(PrivateKey).collect()).unwrap()
+  };
 
-  let json: &[u8] = &fs::read(CONFIG).await.unwrap()[..];
-  let config: BTreeMap<String,TargetValue> = serde_json::from_slice(json).unwrap();
+  let cert: Vec<Certificate> = {
+    let file = std::fs::File::open(CERT).unwrap();
+    let mut buf = std::io::BufReader::new(file);
+    rustls_pemfile::certs(&mut buf)
+    .map(|mut certs| certs.drain(..).map(Certificate).collect()).unwrap()
+  };
 
-  let mut http = vec![];
-  let mut ws = vec![];
+  let config = tokio_rustls::rustls::ServerConfig::builder()
+    .with_safe_defaults()
+    .with_no_client_auth()
+    .with_single_cert(cert, key.remove(0))
+    .unwrap();
 
-  let mut view = vec![];
-
-  println!("#=Config Map==========================");
-
-  config.into_iter().for_each(|tar|{
-    let domain = tar.0;
-
-    let target = match tar.1 {
-      TargetValue::Port(p) => {
-        view.push(format!("Proxy | {} -> localhost:{}",domain,&p));
-        let target = Target::Proxy(domain, p);
-        ws.push(target.clone());
-        target
-      },
-      TargetValue::Path(p) => {
-        view.push(format!("Static| {} -> {}",domain,&p));
-        Target::Static(domain, p)
-      }
-    };
-
-    http.push(target)
-  });
-
-  view.sort_by(|a,b|b.len().cmp(&a.len()));
-  println!("|{}",view.join("\n|"));
-
-  println!("#=====================================");
-
-  (http,ws)
+  TlsAcceptor::from(Arc::new(config))
 }
