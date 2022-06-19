@@ -74,8 +74,8 @@ impl Target {
   /// true = Path, false = Port
   fn method(&self) -> bool {
     match self {
-      Target::Path(target) => true,
-      Target::Port(target) => false,
+      Target::Path(_) => true,
+      Target::Port(_) => false,
     }
   }
 }
