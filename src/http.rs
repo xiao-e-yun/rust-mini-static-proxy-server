@@ -15,7 +15,7 @@ use hyper_staticfile::ResolveResult;
 use crate::{Req,Res};
 
 pub async fn server(mut request: Req, domain: String) -> Res {
-  *request.uri_mut() = format!("{}{}",&domain,request.uri()).parse().unwrap();
+  *request.uri_mut() = format!("http://{}{}",&domain,request.uri()).parse().unwrap();
   hyper::Client::new().request(request).await.unwrap_or(
     hyper::Response::builder()
       .status(503)

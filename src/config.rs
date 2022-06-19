@@ -30,7 +30,14 @@ Example.
   let config: Config = serde_json::from_slice(json).unwrap();
 
   println!("#= Config Map ============================================");
-  config.proxy.iter().for_each(|(domain, target)| {
+  let mut vec = config.proxy.iter().collect::<Vec<(&String, &Target)>>();
+  vec.sort_by(|a,b|{
+    let a_method = a.1.method();
+    let b_method = b.1.method();
+    if a_method != b_method { return a_method.cmp(&b_method); }
+    a.0.cmp(a.0)
+  });
+  vec.iter().for_each(|(domain, target)| {
     let (mode,target) = target.mode();
     println!("|{}| {} -> {}",mode , domain, target)
   });
@@ -61,7 +68,14 @@ impl Target {
   pub fn get(&self) -> (String,bool) {
     match self {
       Target::Path(target) => (target.clone(),false),
-      Target::Port(target) => (format!("http://127.0.0.1:{}",target),true),
+      Target::Port(target) => (format!("127.0.0.1:{}",target),true),
+    }
+  }
+  /// true = Path, false = Port
+  fn method(&self) -> bool {
+    match self {
+      Target::Path(target) => true,
+      Target::Port(target) => false,
     }
   }
 }
